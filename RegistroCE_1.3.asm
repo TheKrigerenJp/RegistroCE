@@ -11,6 +11,7 @@ DATA SEGMENT
     MAX_STUDENTS    EQU 15
     NAME_REC_LEN    EQU 50
     NOTE_REC_LEN    EQU 20  
+    ten             DW  10 ;Nuevo contador para validar nota
     
     ; Mensajes del menu
     titleMsg        DB 13,10,'==== Sistema de Gestion de Calificaciones (RegistroCE) ====$'
@@ -30,6 +31,7 @@ DATA SEGMENT
     msgEnterNote    DB 13,10,'Ingrese Nota (0-100, hasta 5 decimales): $'
     msgStored       DB 13,10,'Datos almacenados correctamente.$'
     msgFull         DB 13,10,'Error: Capacidad maxima (15 estudiantes) alcanzada.$'
+    msgInvalidNote  DB 13, 10, 'Error: Nota invalida. Ingrese valor entre 0-100 y maximo 5 decimales.$'
     
     ; Mensajes de stub (temporal) (mas abajo digo que es stub)
     msgStub2        DB '<< Stub >> Mostrar estadisticas (pendiente)$'
@@ -112,34 +114,48 @@ OPT_1 PROC NEAR
     LEA DX, msgEnterName
     CALL PrintStr
     LEA DX, nameBuff
-    CALL ReadLine
+    CALL ReadLine     
+    
 
+GET_NOTE:   ; bucle hasta que nota sea valida
     ; ---- Pedir nota ----
     LEA DX, msgEnterNote
     CALL PrintStr
     LEA DX, noteBuff
     CALL ReadLine
 
-    ; ---- Guardar datos ----
-    ; indice = studentCount
+    ; Validar nota
+    LEA SI, noteBuff+2
+    MOV CL, [noteBuff+1]
+    CALL ValidateNote
+    CMP AL, 1
+    JE  NOTE_OK
+
+    ; Nota invalida -> mensaje y reintentar
+    LEA DX, msgInvalidNote
+    CALL PrintStr
+    JMP GET_NOTE
+
+NOTE_OK:
+    ; ---- Guardar NOMBRE ----
     XOR BX, BX
     MOV BL, studentCount
 
-    ; Guardar nombre
-    LEA SI, nameBuff+2           ; datos reales empiezan en +2
+    LEA SI, nameBuff+2
     LEA DI, names
     MOV AX, BX
     MOV CX, NAME_REC_LEN
-    MUL CX
-    ADD DI, AX                   ; destino = base + index*len
+    MUL CX                  ; AX = index * NAME_REC_LEN
+    ADD DI, AX
 
-    MOV CL, [nameBuff+1]         ; longitud ingresada
-    JCXZ SKIP_NAME               ; si no hay caracteres, saltar
+    MOV CL, [nameBuff+1]
+    CMP CL, 0
+    JE  SKIP_NAME
     REP MOVSB
 SKIP_NAME:
-    MOV BYTE PTR [DI],'$'        ; terminador
+    MOV BYTE PTR [DI], '$'
 
-    ; Guardar nota
+    ; ---- Guardar NOTA ----
     LEA SI, noteBuff+2
     LEA DI, notes
     MOV AX, BX
@@ -147,11 +163,12 @@ SKIP_NAME:
     MUL CX
     ADD DI, AX
 
-    MOV CL,[noteBuff+1]
-    JCXZ SKIP_NOTE
+    MOV CL, [noteBuff+1]
+    CMP CL, 0
+    JE  SKIP_NOTE
     REP MOVSB
 SKIP_NOTE:
-    MOV BYTE PTR [DI],'$'
+    MOV BYTE PTR [DI], '$'
 
     ; Aumentar contador
     INC studentCount
@@ -167,6 +184,7 @@ LIST_FULL:
     CALL PrintStr
     CALL PressAnyKey
     JMP MAIN_MENU
+    
 OPT_1 ENDP
 
 
@@ -236,7 +254,129 @@ ReadLine PROC NEAR
     MOV AH,0Ah
     INT 21h
     RET
-ReadLine ENDP
+ReadLine ENDP    
+
+;
+
+ValidateNote PROC NEAR
+    PUSH BX
+    PUSH CX
+    PUSH DX
+    PUSH DI
+    PUSH BP
+
+    MOV     AL, 0          ; invalida por defecto
+
+    ; Si se ingresa un valor con longitud 0
+    CMP     CL, 0
+    JE      VN_FAIL
+
+    ; --- TRIM de CR/LF/espacios finales ---  
+    ; TRIM: Es una accion dedica a borrar caracteres indeseados de una cadena de texto
+    ; CR es Carriage Return 
+    ; LF es Line Feed
+    ; Con el TRIM lo que hacemos es validar que si el usuario ingreso caracteres, espacios
+    ; etc, tenemos que decirle que los borre y disminuya la memoria donde se estaba guardando
+    ; Esto debido a que estuve teniendo errores (Jose) ya que a pesar de que si ingresaba 
+    ; datos correctos, solo me indicaba error y era por esto mismo, el bucle no sabia 
+    ; interpretar los datos ingresados porque no habia un filtro
+    MOV     DI, SI
+    ADD     DI, CX
+    DEC     DI
+VN_TRIM:
+    CMP     CL, 0
+    JE      VN_FAIL
+    MOV     AL, [DI]
+    CMP     AL, 13          ; CR
+    JE      VN_TRIM_DEC
+    CMP     AL, 10          ; LF
+    JE      VN_TRIM_DEC
+    CMP     AL, ' '         ; espacio
+    JNE     VN_START
+VN_TRIM_DEC:
+    DEC     CL
+    DEC     DI
+    JMP     VN_TRIM
+
+VN_START:
+    XOR     DX, DX          ; DX = parte entera acumulada (0..100)
+    XOR     BX, BX          ; BL = flag punto (0/1), BH = contador de decimales
+    XOR     BP, BP          ; BP = 0 -> aun no hay digitos
+
+VN_LOOP:
+    CMP     CL, 0
+    JE      VN_OK
+
+    LODSB                   ; AL = char, SI++, CL--
+    DEC     CL
+
+    CMP     AL, '.'
+    JE      VN_POINT
+
+    ; Debe ser digito
+    CMP     AL, '0'
+    JB      VN_FAIL
+    CMP     AL, '9'
+    JA      VN_FAIL
+
+    ; Convertir a 0..9 en DI
+    MOV     AH, 0
+    MOV     DI, AX
+    SUB     DI, '0'
+    MOV     BP, 1           ; vimos al menos un digito
+
+    ; entero o decimal?
+    CMP     BL, 0
+    JNE     VN_DEC
+
+    ; --- parte entera: DX = DX*10 + DI (sin tocar CL) ---
+    MOV     AX, DX
+    MUL     ten             ; DX:AX = AX * 10
+    MOV     DX, AX
+    ADD     DX, DI
+    CMP     DX, 100
+    JA      VN_FAIL
+    JMP     VN_LOOP
+
+VN_POINT:
+    ; segundo '.' -> invalido
+    CMP     BL, 0
+    JNE     VN_FAIL
+    MOV     BL, 1
+    JMP     VN_LOOP
+
+VN_DEC:
+    ; si parte entera es 100, todos decimales deben ser 0
+    CMP     DX, 100
+    JNE     @count_dec
+    CMP     DI, 0
+    JNE     VN_FAIL
+@count_dec:
+    INC     BH
+    CMP     BH, 5
+    JA      VN_FAIL
+    JMP     VN_LOOP
+
+VN_OK:
+    ; al menos un digito?
+    CMP     BP, 0
+    JE      VN_FAIL
+
+    MOV     AL, 1
+    JMP     VN_DONE
+
+VN_FAIL:
+    MOV     AL, 0
+
+VN_DONE:
+    POP     BP
+    POP     DI
+    POP     DX
+    POP     CX
+    POP     BX
+    RET
+ValidateNote ENDP
+
 
 CODE ENDS
 END START
