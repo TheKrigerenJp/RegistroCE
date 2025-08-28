@@ -6,7 +6,8 @@
 ; Solo muestra el menu, lee opcion 1..5 y salta a stubs
 ; ============================================
 
-DATA SEGMENT 
+DATA SEGMENT                 
+    full_name_buff DB NAME_REC_LEN DUP(0) ;almacena el nombre y los apellidos hasta que llegue a la ubicacion final
     ; Constantes (cuantos estudiantes se pueden ingresar, largo del nombre y nota)
     MAX_STUDENTS    EQU 15
     NAME_REC_LEN    EQU 50
@@ -27,11 +28,16 @@ DATA SEGMENT
     crlf            DB 13,10,'$' 
     
     ; Mensajes de la opcion 1
-    msgEnterName    DB 13,10,'Ingrese Nombre y Apellidos: $'
+    msgEnterName    DB 13,10,'Ingrese Nombre: $'  
+    msgInvalidName  DB 13,10,'Error: Ingrese un nombre valido.$'  
+    msgEnterApell1  DB 13,10,'Ingrese Primer Apellido: $'       
+    msgInvalidApell DB 13,10,'Error: Ingrese un apellido valido.$'
+    msgEnterApell2  DB 13,10,'Ingrese Segundo Apellido: $'
     msgEnterNote    DB 13,10,'Ingrese Nota (0-100, hasta 5 decimales): $'
     msgStored       DB 13,10,'Datos almacenados correctamente.$'
     msgFull         DB 13,10,'Error: Capacidad maxima (15 estudiantes) alcanzada.$'
     msgInvalidNote  DB 13, 10, 'Error: Nota invalida. Ingrese valor entre 0-100 y maximo 5 decimales.$'
+   
     
     ; Mensajes de stub (temporal) (mas abajo digo que es stub)
     msgStub2        DB '<< Stub >> Mostrar estadisticas (pendiente)$'
@@ -109,14 +115,102 @@ OPT_1 PROC NEAR
     MOV AL, studentCount
     CMP AL, MAX_STUDENTS
     JAE LIST_FULL
-
-    ; ---- Pedir nombre ----
+                                  
+GET_NOMBRE:
+    ; pide el nombre
     LEA DX, msgEnterName
     CALL PrintStr
     LEA DX, nameBuff
-    CALL ReadLine     
-    
+    CALL ReadLine
 
+    ;Verificar que se escriba algo
+    MOV CL, [nameBuff+1] ;largo de lo escrito
+    CMP CL, 0
+    JE  NOMBRE_VACIO   ; si es 0 es porque esta vacio, no deberia continuar
+    JMP GET_APELLIDO1     ; si se escribio algo se puede continuar   
+    
+    
+NOMBRE_VACIO:   
+
+    LEA DX, msgInvalidName  ; mensaje de error por no escribir nada
+    CALL PrintStr
+    JMP GET_NOMBRE
+
+GET_APELLIDO1:
+
+    LEA DX, msgEnterApell1
+    CALL PrintStr
+    LEA DX, nameBuff
+    CALL ReadLine
+
+    ; Verifica que se escriba algo
+    MOV CL, [nameBuff+1]
+    CMP CL, 0
+    JE APELLIDO1_VACIO   ; ;funciona igual que el nombre
+    JMP APELLIDO1_OK     
+
+APELLIDO1_VACIO:
+    LEA DX, msgInvalidApell 
+    CALL PrintStr
+    JMP GET_APELLIDO1      ; Vuelve a pedir el primer apellido
+
+APELLIDO1_OK:
+    ; Agrega un espacio para guardar todo uno por uno
+    LEA DI, full_name_buff
+    MOV AL, 0
+    MOV CX, NAME_REC_LEN
+    ADD DI, CX          
+    DEC DI
+    MOV BYTE PTR [DI], ;Mueve el dato para almacenarlo
+    INC DI
+    
+    ; Agrega el primer apellido junto con el nombre
+    LEA SI, nameBuff+2
+    MOV AL, [nameBuff+1]
+    MOV AH, 0
+    MOV CX, AX
+    REP MOVSB
+
+    JMP GET_APELLIDO2    ; sigue con el segundo apellido 
+    
+GET_APELLIDO2:
+   
+    LEA DX, msgEnterApell2
+    CALL PrintStr
+    LEA DX, nameBuff
+    CALL ReadLine
+
+    ; Verifica que se escriba algo
+    MOV CL, [nameBuff+1]
+    CMP CL, 0
+    JE APELLIDO2_VACIO    ; 
+    JMP APELLIDO2_OK      ; 
+    
+APELLIDO2_VACIO:
+    LEA DX, msgInvalidApell  ; Reutilizamos el mismo mensaje de error en los dos apellidos
+    CALL PrintStr
+    JMP GET_APELLIDO2       ; si esta mal vuelve a pedir el segundo apellido
+
+APELLIDO2_OK:
+    
+    LEA DI, full_name_buff
+    MOV AL, 0
+    MOV CX, NAME_REC_LEN
+    ADD DI, CX              ; finaliza juntar los 3
+    DEC DI
+    MOV BYTE PTR [DI], 
+    INC DI
+    
+  ;Agrega el nombre y los 2 apellidos
+    LEA SI, nameBuff+2
+    MOV AL, [nameBuff+1]
+    MOV AH, 0
+    MOV CX, AX
+    REP MOVSB
+    
+    JMP GET_NOTE           ; Sigue con guardar las notas
+
+                                        
 GET_NOTE:   ; bucle hasta que nota sea valida
     ; ---- Pedir nota ----
     LEA DX, msgEnterNote
@@ -137,7 +231,7 @@ GET_NOTE:   ; bucle hasta que nota sea valida
     JMP GET_NOTE
 
 NOTE_OK:
-    ; ---- Guardar NOMBRE ----
+    ; ---- Guardar NOMBRE y NOTA ----
     XOR BX, BX
     MOV BL, studentCount
 
@@ -151,7 +245,8 @@ NOTE_OK:
     MOV CL, [nameBuff+1]
     CMP CL, 0
     JE  SKIP_NAME
-    REP MOVSB
+    REP MOVSB      
+    
 SKIP_NAME:
     MOV BYTE PTR [DI], '$'
 
@@ -166,7 +261,8 @@ SKIP_NAME:
     MOV CL, [noteBuff+1]
     CMP CL, 0
     JE  SKIP_NOTE
-    REP MOVSB
+    REP MOVSB 
+    
 SKIP_NOTE:
     MOV BYTE PTR [DI], '$'
 
