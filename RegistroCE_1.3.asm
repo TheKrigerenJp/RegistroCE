@@ -6,7 +6,13 @@
 ; Solo muestra el menu, lee opcion 1..5 y salta a stubs
 ; ============================================
 
-DATA SEGMENT
+DATA SEGMENT 
+    ; Constantes (cuantos estudiantes se pueden ingresar, largo del nombre y nota)
+    MAX_STUDENTS    EQU 15
+    NAME_REC_LEN    EQU 50
+    NOTE_REC_LEN    EQU 20  
+    
+    ; Mensajes del menu
     titleMsg        DB 13,10,'==== Sistema de Gestion de Calificaciones (RegistroCE) ====$'
     menuMsg1        DB 13,10,'[1] Ingresar calificaciones$'
     menuMsg2        DB 13,10,'[2] Mostrar estadisticas$'
@@ -17,13 +23,31 @@ DATA SEGMENT
     invalidMsg      DB 13,10,'Opcion invalida. Intente de nuevo.$'
     byeMsg          DB 13,10,'Saliendo...$'
     pressMsg        DB 13,10,'[Presione una tecla para continuar]$'
-    crlf            DB 13,10,'$'
-
+    crlf            DB 13,10,'$' 
+    
+    ; Mensajes de la opcion 1
+    msgEnterName    DB 13,10,'Ingrese Nombre y Apellidos: $'
+    msgEnterNote    DB 13,10,'Ingrese Nota (0-100, hasta 5 decimales): $'
+    msgStored       DB 13,10,'Datos almacenados correctamente.$'
+    msgFull         DB 13,10,'Error: Capacidad maxima (15 estudiantes) alcanzada.$'
+    
     ; Mensajes de stub (temporal) (mas abajo digo que es stub)
-    msgStub1        DB '<< Stub >> Ingresar calificaciones (pendiente)$'
     msgStub2        DB '<< Stub >> Mostrar estadisticas (pendiente)$'
     msgStub3        DB '<< Stub >> Buscar estudiante (pendiente)$'
-    msgStub4        DB '<< Stub >> Ordenar calificaciones (pendiente)$'
+    msgStub4        DB '<< Stub >> Ordenar calificaciones (pendiente)$' 
+    
+    ; Buffers de entrada, al usar el interruptor INT 21h AH=0Ah
+    ; Los buffers trabajan de la siguiente manera, dependiendo de la entrada
+    ; se le indica a DX que hacer (0 tamano max permitido, 1 longitud de la cadena
+    ; realmente y 2 los caracteres escritos por el usuario)
+    nameBuff        DB  NAME_REC_LEN, 0, NAME_REC_LEN DUP(0)
+    noteBuff        DB  NOTE_REC_LEN, 0, NOTE_REC_LEN DUP(0)  
+    
+    ; Estructuras de almacenamiento 
+    studentCount    DB 0
+    names           DB MAX_STUDENTS*NAME_REC_LEN DUP('$')
+    notes           DB MAX_STUDENTS*NOTE_REC_LEN DUP('$')
+
 DATA ENDS
 
 
@@ -75,7 +99,75 @@ INVALID_OPTION:
     LEA DX, invalidMsg
     CALL PrintStr
     CALL PressAnyKey ; otra subrutina que se va a ver mas adelante
+    JMP MAIN_MENU 
+    
+; -----------------Opcion 1: Ingresar datos del estudiante----------
+OPT_1 PROC NEAR
+    ; Revisar capacidad
+    MOV AL, studentCount
+    CMP AL, MAX_STUDENTS
+    JAE LIST_FULL
+
+    ; ---- Pedir nombre ----
+    LEA DX, msgEnterName
+    CALL PrintStr
+    LEA DX, nameBuff
+    CALL ReadLine
+
+    ; ---- Pedir nota ----
+    LEA DX, msgEnterNote
+    CALL PrintStr
+    LEA DX, noteBuff
+    CALL ReadLine
+
+    ; ---- Guardar datos ----
+    ; indice = studentCount
+    XOR BX, BX
+    MOV BL, studentCount
+
+    ; Guardar nombre
+    LEA SI, nameBuff+2           ; datos reales empiezan en +2
+    LEA DI, names
+    MOV AX, BX
+    MOV CX, NAME_REC_LEN
+    MUL CX
+    ADD DI, AX                   ; destino = base + index*len
+
+    MOV CL, [nameBuff+1]         ; longitud ingresada
+    JCXZ SKIP_NAME               ; si no hay caracteres, saltar
+    REP MOVSB
+SKIP_NAME:
+    MOV BYTE PTR [DI],'$'        ; terminador
+
+    ; Guardar nota
+    LEA SI, noteBuff+2
+    LEA DI, notes
+    MOV AX, BX
+    MOV CX, NOTE_REC_LEN
+    MUL CX
+    ADD DI, AX
+
+    MOV CL,[noteBuff+1]
+    JCXZ SKIP_NOTE
+    REP MOVSB
+SKIP_NOTE:
+    MOV BYTE PTR [DI],'$'
+
+    ; Aumentar contador
+    INC studentCount
+
+    ; Confirmacion
+    LEA DX, msgStored
+    CALL PrintStr
+    CALL PressAnyKey
     JMP MAIN_MENU
+
+LIST_FULL:
+    LEA DX, msgFull
+    CALL PrintStr
+    CALL PressAnyKey
+    JMP MAIN_MENU
+OPT_1 ENDP
 
 
 ; ----------------- STUBS (temporal) ----------------- 
@@ -83,11 +175,6 @@ INVALID_OPTION:
 ; el codigo para ver que todo funciona bien de momento, por lo que no hay logica
 ; solo las entradas al hacer click en una de las opciones 
 
-OPT_1:
-    LEA DX, msgStub1
-    CALL PrintStr
-    CALL PressAnyKey
-    JMP MAIN_MENU
 
 OPT_2:
     LEA DX, msgStub2
@@ -142,7 +229,14 @@ PressAnyKey PROC NEAR
     INT 21h
     POP DX
     RET
-PressAnyKey ENDP
+PressAnyKey ENDP  
+
+; Leer una linea (buffer apuntado en DX)
+ReadLine PROC NEAR
+    MOV AH,0Ah
+    INT 21h
+    RET
+ReadLine ENDP
 
 CODE ENDS
 END START
