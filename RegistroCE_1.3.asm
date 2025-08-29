@@ -7,12 +7,15 @@
 ; ============================================
 
 DATA SEGMENT                 
-    full_name_buff DB NAME_REC_LEN DUP(0) ;almacena el nombre y los apellidos hasta que llegue a la ubicacion final
+    
     ; Constantes (cuantos estudiantes se pueden ingresar, largo del nombre y nota)
     MAX_STUDENTS    EQU 15
     NAME_REC_LEN    EQU 50
     NOTE_REC_LEN    EQU 20  
-    ten             DW  10 ;Nuevo contador para validar nota
+    ten             DW  10 ;Nuevo contador para validar nota 
+    
+    ;Buffers temporales
+    full_name_buff DB NAME_REC_LEN DUP(0) ;almacena el nombre y los apellidos hasta que llegue a la ubicacion final 
     
     ; Mensajes del menu
     titleMsg        DB 13,10,'==== Sistema de Gestion de Calificaciones (RegistroCE) ====$'
@@ -114,7 +117,14 @@ OPT_1 PROC NEAR
     ; Revisar capacidad
     MOV AL, studentCount
     CMP AL, MAX_STUDENTS
-    JAE LIST_FULL
+    JAE LIST_FULL 
+    
+    ; Reiniciar full_name_buff (limpiar) y apuntar DI al inicio
+    LEA DI, full_name_buff
+    MOV CX, NAME_REC_LEN
+    MOV AL, 0
+    REP STOSB
+    LEA DI, full_name_buff       ; DI = destino de concatenación
                                   
 GET_NOMBRE:
     ; pide el nombre
@@ -127,6 +137,7 @@ GET_NOMBRE:
     MOV CL, [nameBuff+1] ;largo de lo escrito
     CMP CL, 0
     JE  NOMBRE_VACIO   ; si es 0 es porque esta vacio, no deberia continuar
+    CALL CopyFromInput_Clamp ;Nueva subrutina 
     JMP GET_APELLIDO1     ; si se escribio algo se puede continuar   
     
     
@@ -136,8 +147,9 @@ NOMBRE_VACIO:
     CALL PrintStr
     JMP GET_NOMBRE
 
-GET_APELLIDO1:
+GET_APELLIDO1: 
 
+    CALL PutSpaceIfRoom ;AQUIIIIIIII
     LEA DX, msgEnterApell1
     CALL PrintStr
     LEA DX, nameBuff
@@ -147,34 +159,19 @@ GET_APELLIDO1:
     MOV CL, [nameBuff+1]
     CMP CL, 0
     JE APELLIDO1_VACIO   ; ;funciona igual que el nombre
-    JMP APELLIDO1_OK     
+    CALL CopyFromInput_Clamp
+    JMP GET_APELLIDO2     
 
 APELLIDO1_VACIO:
     LEA DX, msgInvalidApell 
     CALL PrintStr
     JMP GET_APELLIDO1      ; Vuelve a pedir el primer apellido
 
-APELLIDO1_OK:
-    ; Agrega un espacio para guardar todo uno por uno
-    LEA DI, full_name_buff
-    MOV AL, 0
-    MOV CX, NAME_REC_LEN
-    ADD DI, CX          
-    DEC DI
-    MOV BYTE PTR [DI], ;Mueve el dato para almacenarlo
-    INC DI
+ 
     
-    ; Agrega el primer apellido junto con el nombre
-    LEA SI, nameBuff+2
-    MOV AL, [nameBuff+1]
-    MOV AH, 0
-    MOV CX, AX
-    REP MOVSB
+GET_APELLIDO2: 
 
-    JMP GET_APELLIDO2    ; sigue con el segundo apellido 
-    
-GET_APELLIDO2:
-   
+    CALL PutSpaceIfRoom   
     LEA DX, msgEnterApell2
     CALL PrintStr
     LEA DX, nameBuff
@@ -184,40 +181,41 @@ GET_APELLIDO2:
     MOV CL, [nameBuff+1]
     CMP CL, 0
     JE APELLIDO2_VACIO    ; 
-    JMP APELLIDO2_OK      ; 
+    CALL CopyFromInput_Clamp      ; 
+    JMP GET_NOTE
     
 APELLIDO2_VACIO:
     LEA DX, msgInvalidApell  ; Reutilizamos el mismo mensaje de error en los dos apellidos
     CALL PrintStr
     JMP GET_APELLIDO2       ; si esta mal vuelve a pedir el segundo apellido
 
-APELLIDO2_OK:
-    
-    LEA DI, full_name_buff
-    MOV AL, 0
-    MOV CX, NAME_REC_LEN
-    ADD DI, CX              ; finaliza juntar los 3
-    DEC DI
-    MOV BYTE PTR [DI], 
-    INC DI
-    
-  ;Agrega el nombre y los 2 apellidos
-    LEA SI, nameBuff+2
-    MOV AL, [nameBuff+1]
-    MOV AH, 0
-    MOV CX, AX
-    REP MOVSB
-    
-    JMP GET_NOTE           ; Sigue con guardar las notas
+
+   
 
                                         
-GET_NOTE:   ; bucle hasta que nota sea valida
-    ; ---- Pedir nota ----
+GET_NOTE:   
+    ; bucle hasta que nota sea valida
+    ; Terminar full_name_buff con '$' 
+    MOV AX, DI
+    SUB AX, OFFSET full_name_buff
+    MOV DX, NAME_REC_LEN-1
+    CMP AX, DX
+    ; El nombre de estas subrutinas tienen un @ por seguir 
+    ; una convencion basado en MASM/TASM 
+    ; Lo que nos indica son subfunciones dentro de las funciones, como funciones locales
+    JA  @no_room_dollar  
+    MOV BYTE PTR [DI], '$'
+    JMP @after_dollar
+@no_room_dollar:
+    MOV BYTE PTR [full_name_buff+NAME_REC_LEN-1], '$' ;forzamos a que el ultimo byte sea un $
+@after_dollar: ;Esta etiqueta solo indica que el flujo sigue normal despues de agregar o no el $
+
+ASK_NOTE:
     LEA DX, msgEnterNote
     CALL PrintStr
     LEA DX, noteBuff
-    CALL ReadLine
-
+    CALL ReadLine 
+    
     ; Validar nota
     LEA SI, noteBuff+2
     MOV CL, [noteBuff+1]
@@ -225,32 +223,28 @@ GET_NOTE:   ; bucle hasta que nota sea valida
     CMP AL, 1
     JE  NOTE_OK
 
-    ; Nota invalida -> mensaje y reintentar
     LEA DX, msgInvalidNote
     CALL PrintStr
-    JMP GET_NOTE
+    JMP ASK_NOTE
+    
 
 NOTE_OK:
     ; ---- Guardar NOMBRE y NOTA ----
+    ; Guardar NOMBRE en arreglo 'names' (desde full_name_buff)
     XOR BX, BX
     MOV BL, studentCount
 
-    LEA SI, nameBuff+2
+    LEA SI, full_name_buff
     LEA DI, names
     MOV AX, BX
     MOV CX, NAME_REC_LEN
-    MUL CX                  ; AX = index * NAME_REC_LEN
+    MUL CX                 ; AX = index * NAME_REC_LEN
     ADD DI, AX
+    MOV CX, NAME_REC_LEN-1
+    REP MOVSB
+    MOV BYTE PTR [DI], '$' ; terminador
 
-    MOV CL, [nameBuff+1]
-    CMP CL, 0
-    JE  SKIP_NAME
-    REP MOVSB      
-    
-SKIP_NAME:
-    MOV BYTE PTR [DI], '$'
-
-    ; ---- Guardar NOTA ----
+    ; Guardar NOTA en arreglo 'notes'
     LEA SI, noteBuff+2
     LEA DI, notes
     MOV AX, BX
@@ -259,14 +253,20 @@ SKIP_NAME:
     ADD DI, AX
 
     MOV CL, [noteBuff+1]
+    MOV AL, NOTE_REC_LEN-1
+    CMP CL, AL
+    JBE @note_len_ok
+    MOV CL, AL
+@note_len_ok:
     CMP CL, 0
     JE  SKIP_NOTE
-    REP MOVSB 
+    REP MOVSB
+          
     
 SKIP_NOTE:
     MOV BYTE PTR [DI], '$'
 
-    ; Aumentar contador
+    ; Incrementar contador
     INC studentCount
 
     ; Confirmacion
@@ -350,9 +350,59 @@ ReadLine PROC NEAR
     MOV AH,0Ah
     INT 21h
     RET
-ReadLine ENDP    
+ReadLine ENDP
 
-;
+; ---- Subrutinas para armar nombre completo en full_name_buff ----
+
+; CopyFromInput_Clamp:
+; Copia desde nameBuff (+2) hacia [DI] sin exceder (NAME_REC_LEN-1).
+; Entrada: DI = destino (dentro de full_name_buff)
+CopyFromInput_Clamp PROC NEAR
+    PUSH AX
+    PUSH CX
+    PUSH SI
+    PUSH DX
+
+    MOV CL, [nameBuff+1]               ; longitud tecleada
+    MOV AX, DI
+    SUB AX, OFFSET full_name_buff      ; usados
+    MOV DX, NAME_REC_LEN-1
+    SUB DX, AX                         ; libres
+    CMP CL, DL
+    JBE @len_ok
+    MOV CL, DL
+@len_ok:
+    LEA SI, nameBuff+2
+    JCXZ @done
+    REP MOVSB
+@done:
+    POP DX
+    POP SI
+    POP CX
+    POP AX
+    RET
+CopyFromInput_Clamp ENDP
+
+; PutSpaceIfRoom:
+; Escribe un espacio si queda sitio antes del '$' final.
+; Entrada: DI = posicion actual en full_name_buff
+PutSpaceIfRoom PROC NEAR
+    PUSH AX
+    PUSH DX
+    MOV AX, DI
+    SUB AX, OFFSET full_name_buff
+    MOV DX, NAME_REC_LEN-1
+    CMP AX, DX
+    JAE @nospace
+    MOV BYTE PTR [DI], ' '
+    INC DI
+@nospace:
+    POP DX
+    POP AX
+    RET
+PutSpaceIfRoom ENDP
+
+;----Subrutinas para la validacion de las notas (que se cumpla todos los filtros)----
 
 ValidateNote PROC NEAR
     PUSH BX
