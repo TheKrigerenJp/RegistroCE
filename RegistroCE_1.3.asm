@@ -73,7 +73,8 @@ DATA SEGMENT
     msgMax          DB 13,10,'Maximo: $'
     msgMin          DB 13,10,'Minimo: $'
     msgAprob        DB 13,10,'Aprobados: $'
-    msgReprob       DB 13,10,'Reprobados: $'
+    msgReprob       DB 13,10,'Reprobados: $' 
+    msgDbgAvgHex    DB 13,10,'AVG HEX DX:AX ='
    
     
     ; Mensajes de stub (temporal) (mas abajo digo que es stub)
@@ -98,7 +99,12 @@ DATA SEGMENT
     ; Estructuras de almacenamiento 
     studentCount    DB 0
     names           DB MAX_STUDENTS*NAME_REC_LEN DUP('$')
-    notes           DB MAX_STUDENTS*NOTE_REC_LEN DUP('$')
+    notes           DB MAX_STUDENTS*NOTE_REC_LEN DUP('$') 
+    frac5           DB 5 DUP (?) ;Guarda los 5 digitos fraccionales
+    div10_rem       DB 0 ;aqui se deja el resto
+    p_seen_dot    DB 0   ; flag: vimos el punto decimal
+    p_dec_count   DB 0   ; cuántos decimales llevamos (0..5)
+
 
 DATA ENDS
 
@@ -110,6 +116,8 @@ START:
     ; Inicializar DS
     MOV AX, DATA
     MOV DS, AX
+    MOV ES, AX
+    CLD
 
 ; ----------------- MENU PRINCIPAL -----------------
 MAIN_MENU: 
@@ -282,30 +290,97 @@ NOTE_OK:
     MUL CX                 ; AX = index * NAME_REC_LEN
     ADD DI, AX
     MOV CX, NAME_REC_LEN-1
+    CLD
     REP MOVSB
     MOV BYTE PTR [DI], '$' ; terminador
 
-    ; Guardar NOTA en arreglo 'notes'
-    LEA SI, noteBuff+2
-    LEA DI, notes
-    MOV AX, BX
-    MOV CX, NOTE_REC_LEN
-    MUL CX
-    ADD DI, AX
+            ; ======= GUARDAR NOTA (hasta CR) + DEBUG =======
+; idx = studentCount en BL
 
-    MOV CL, [noteBuff+1]
-    MOV AL, NOTE_REC_LEN-1
-    CMP CL, AL
-    JBE @note_len_ok
-    MOV CL, AL
-@note_len_ok:
-    CMP CL, 0
-    JE  SKIP_NOTE
-    REP MOVSB
-          
-    
-SKIP_NOTE:
-    MOV BYTE PTR [DI], '$'
+PUSH BX
+
+; -- Dump rápido del buffer (ASCII) --
+LEA  DX, noteBuff+2
+MOV  DL, '<'           ; usamos PrintChar; luego recargamos DX
+CALL PrintChar
+LEA  DX, noteBuff+2
+CALL PrintStr          ; requiere '$' temporal; si no lo tienes, omite esta línea
+MOV  DL, '>'
+CALL PrintChar
+CALL PrintCRLF
+
+; -- Dump HEX del buffer: primeros 3 bytes (esperado 38 30 0D para "80") --
+LEA  SI, noteBuff+2
+MOV  DL, '<'
+CALL PrintChar
+MOV  AL, [SI]
+CALL PrintHexByte
+MOV  DL, ' '
+CALL PrintChar
+MOV  AL, [SI+1]
+CALL PrintHexByte
+MOV  DL, ' '
+CALL PrintChar
+MOV  AL, [SI+2]
+CALL PrintHexByte
+MOV  DL, '>'
+CALL PrintChar
+CALL PrintCRLF
+
+; 1) DI = &notes + idx*NOTE_REC_LEN (sin MUL)
+LEA  DI, notes
+XOR  BH, BH
+MOV  CX, BX
+JCXZ gdst_ready
+gdst_add:
+    ADD  DI, NOTE_REC_LEN
+    LOOP gdst_add
+gdst_ready:
+
+PUSH DI                 ; INICIO del slot (para debug posterior)
+
+; 2) Copiar desde noteBuff+2 hasta CR (0Dh)
+LEA  SI, noteBuff+2
+CLD
+gcpy_loop:
+    LODSB
+    CMP  AL, 13         ; CR?
+    JE   gcpy_end
+    STOSB
+    JMP  gcpy_loop
+gcpy_end:
+MOV  BYTE PTR [DI], '$' ; terminar campo
+
+; 3) Dump HEX del slot (primeros 3 bytes; esperado 38 30 24)
+POP  SI                 ; SI = INICIO del slot
+MOV  DL, '['
+CALL PrintChar
+MOV  AL, [SI]
+CALL PrintHexByte
+MOV  DL, ' '
+CALL PrintChar
+MOV  AL, [SI+1]
+CALL PrintHexByte
+MOV  DL, ' '
+CALL PrintChar
+MOV  AL, [SI+2]
+CALL PrintHexByte
+MOV  DL, ']'
+CALL PrintChar
+CALL PrintCRLF
+
+; 4) Imprimir la cadena tal cual
+MOV  DL, '{'
+CALL PrintChar
+MOV  DX, SI             ; ojo: recargo DX DESPUÉS de usar PrintChar
+CALL PrintStr           ; debería verse {80} si tecleaste 80
+MOV  DL, '}'
+CALL PrintChar
+CALL PrintCRLF
+
+POP  BX
+; ======= FIN GUARDAR NOTA =======
+
 
     ; Incrementar contador
     INC studentCount
@@ -326,7 +401,6 @@ OPT_1 ENDP
 
 
 ;-----ESTADISTICAS-------
-
 OPT_2:
     ; Si no hay estudiantes, salir
     MOV AL, studentCount
@@ -334,21 +408,71 @@ OPT_2:
     JE  NO_DATA_STATS
 
     ; Inicializar acumuladores
-    MOV WORD PTR sum_hi, 0
-    MOV WORD PTR sum_lo, 0
-    MOV WORD PTR cntAprob, 0
-    MOV WORD PTR cntReprob, 0
+    MOV WORD PTR sum_hi,     0
+    MOV WORD PTR sum_lo,     0
+    MOV WORD PTR cntAprob,   0
+    MOV WORD PTR cntReprob,  0
 
     ; i=0..studentCount-1
-    XOR BX, BX                ; BX = i
-    LEA DI, notes             ; DI apunta al primer registro de nota
+    XOR BX, BX                ; BX = i (usaremos BL)
+    LEA DI, notes             ; DI = &notes[0]
 
-    ; Procesar el primer elemento para min/max
+    ; ------------------------------
+    ; Encontrar el PRIMER slot no vacío para inicializar min/max/sum
+    ; ------------------------------
+FIND_FIRST_NONEMPTY:
+    MOV AL, studentCount
+    CMP BL, AL
+    JAE NO_VALID_NOTES            ; todos vacíos => no hay datos válidos
+
+    CMP BYTE PTR [DI], '$'
+    JE  FF_NEXT
+
+    ; Procesar primer no-vacío:
     PUSH DI
-    CALL StrLenUntilDollar_NOTE   ; CL = longitud
-    POP DI
-    LEA SI, [DI]
-    CALL ParseNoteToScaled        ; DX:AX = valor (escala 10^5)
+    CALL StrLenUntilDollar_NOTE   ; (si tu rutina la usa para algo, mantenla)
+    POP  DI
+    
+        ; justo antes de MOV SI, DI
+    PUSH DX
+    MOV  DX, DI
+    CALL PrintStr      ; imprime la nota tal cual (terminada en '$')
+    CALL PrintCRLF
+    POP  DX
+    
+    ;LEA SI, [DI]                  ; SI = inicio de la nota
+    MOV SI, DI
+    CALL ParseNoteToScaled        ; DX:AX = valor escalado x10^5  
+    
+        ; --- DBG: Nota[BL] parseada (DX:AX) ---
+    PUSH AX
+    PUSH DX
+    ; imprime "DBG nota: "
+    MOV  DL, 'D'     ; D
+    CALL PrintChar
+    MOV  DL, 'B'     ; B
+    CALL PrintChar
+    MOV  DL, 'G'     ; G
+    CALL PrintChar
+    MOV  DL, ' '     ; espacio
+    CALL PrintChar
+    MOV  DL, 'n'
+    CALL PrintChar
+    MOV  DL, 'o'
+    CALL PrintChar
+    MOV  DL, 't'
+    CALL PrintChar
+    MOV  DL, 'a'
+    CALL PrintChar
+    MOV  DL, ':'
+    CALL PrintChar
+    MOV  DL, ' '
+    CALL PrintChar
+    CALL PrintScaled5_FromDXAX   ; imprime DX:AX (×10^5)
+    CALL PrintCRLF
+    POP  DX
+    POP  AX
+
 
     ; min = max = valor
     MOV min_hi, DX
@@ -356,28 +480,76 @@ OPT_2:
     MOV max_hi, DX
     MOV max_lo, AX
 
-    ; sum += valor
-    PUSH DX
+    ; sum_lo += AX ; sum_hi += DX + carry
+    MOV  BX, sum_lo
+    ADD  BX, AX
+    MOV  sum_lo, BX
+    MOV  BX, sum_hi
+    ADC  BX, DX
+    MOV  sum_hi, BX  
+    
+        ; --- DBG: sum tras primera nota (sum_hi:sum_lo) ---
     PUSH AX
-    CALL Add32ToSum
-    POP AX
-    POP DX
+    PUSH DX
+    MOV  DX, sum_hi
+    MOV  AX, sum_lo
+    ; imprime "DBG sum0: "
+    MOV  DL, 'D'
+    CALL PrintChar
+    MOV  DL, 'B'
+    CALL PrintChar
+    MOV  DL, 'G'
+    CALL PrintChar
+    MOV  DL, ' '
+    CALL PrintChar
+    MOV  DL, 's'
+    CALL PrintChar
+    MOV  DL, 'u'
+    CALL PrintChar
+    MOV  DL, 'm'
+    CALL PrintChar
+    MOV  DL, '0'
+    CALL PrintChar
+    MOV  DL, ':'
+    CALL PrintChar
+    MOV  DL, ' '
+    CALL PrintChar
+    CALL PrintScaled5_FromDXAX   ; debería imprimir lo mismo que la nota (80.00000 con 1 sola)
+    CALL PrintCRLF
+    POP  DX
+    POP  AX
+
+
 
     ; aprobar/reprobar
     PUSH DX
     PUSH AX
-    CALL IsGE_70Scaled           ; AL=1 si >=70
-    CMP AL, 0
-    JE  first_rep
-    INC WORD PTR cntAprob
-    JMP first_done
+    CALL IsGE_70Scaled            ; AL=1 si >=70
+    CMP  AL, 0
+    JE   first_rep
+    INC  WORD PTR cntAprob
+    JMP  first_done
 first_rep:
-    INC WORD PTR cntReprob
+    INC  WORD PTR cntReprob
 first_done:
 
-    ; avanzar al siguiente
+    ; avanzar al siguiente para entrar al bucle general
     INC BL
     ADD DI, NOTE_REC_LEN
+    JMP LOOP_NOTES
+
+FF_NEXT:
+    ; slot vacío: avanzar
+    INC BL
+    ADD DI, NOTE_REC_LEN
+    JMP FIND_FIRST_NONEMPTY
+
+NO_VALID_NOTES:
+    ; Hay estudiantes pero todas las notas están vacías
+    LEA DX, msgNoData
+    CALL PrintStr
+    CALL PressAnyKey
+    JMP MAIN_MENU
 
 ; ---- loop para el resto ----
 LOOP_NOTES:
@@ -385,32 +557,39 @@ LOOP_NOTES:
     CMP BL, AL
     JAE DONE_NOTES
 
+    ; si el slot está vacío, saltar sin contar
+    CMP BYTE PTR [DI], '$'
+    JE  LN_NEXT
+
     PUSH DI
     CALL StrLenUntilDollar_NOTE
-    POP DI
-    LEA SI, [DI]
-    CALL ParseNoteToScaled       ; DX:AX = valor actual
+    POP  DI
 
-    ; sum += valor
-    PUSH DX
-    PUSH AX
-    CALL Add32ToSum
-    POP AX
-    POP DX
+    ;LEA SI, [DI]
+    MOV SI, DI
+    CALL ParseNoteToScaled       ; DX:AX = valor actual (x10^5)
 
-    ; min ?
+    ; sum_lo += AX ; sum_hi += DX + carry
+    MOV  BX, sum_lo
+    ADD  BX, AX
+    MOV  sum_lo, BX
+    MOV  BX, sum_hi
+    ADC  BX, DX
+    MOV  sum_hi, BX
+
+    ; min ?  (CF=1 si DX:AX < BX:CX)
     MOV BX, min_hi
     MOV CX, min_lo
-    CALL Cmp32_DXAX_vs_BXCX      ; CF=1 si actual < min
+    CALL Cmp32_DXAX_vs_BXCX
     JNC no_new_min
     MOV min_hi, DX
     MOV min_lo, AX
 no_new_min:
 
-    ; max ?
+    ; max ?  (CF=1 si DX:AX < BX:CX) => si no es menor, puede ser nuevo max
     MOV BX, max_hi
     MOV CX, max_lo
-    CALL Cmp32_DXAX_vs_BXCX      ; CF=1 si actual < max
+    CALL Cmp32_DXAX_vs_BXCX
     JC  no_new_max
     MOV max_hi, DX
     MOV max_lo, AX
@@ -428,7 +607,8 @@ add_rep:
     INC WORD PTR cntReprob
 after_cnt:
 
-    ; siguiente
+LN_NEXT:
+    ; siguiente elemento
     INC BL
     ADD DI, NOTE_REC_LEN
     JMP LOOP_NOTES
@@ -439,13 +619,52 @@ DONE_NOTES:
     LEA DX, msgStatsTitle
     CALL PrintStr
 
-    ; Promedio general (impresión por división larga sin DIV)
-    LEA DX, msgProm
+    ; -------- Promedio general (32/16 ? 32) --------
+    
+    ; --- TEST: el impresor debe mostrar 80.00000 ---
+    LEA DX, msgProm   ; o cualquier rótulo para que lo veas claro
     CALL PrintStr
-    ; Imprime sum_hi:sum_lo / (studentCount*100000) con 5 decimales
-    CALL PrintAverage_NoDiv
+    MOV DX, 007Ah
+    MOV AX, 01200h
+    CALL PrintScaled5_FromDXAX
+    CALL PrintCRLF
+    ; --- FIN TEST ---
+
+    ; n = cntAprob + cntReprob  (solo notas válidas)
+    MOV AX, cntAprob
+    ADD AX, cntReprob
+    CMP AX, 0
+    JE  AVG_ZERO
+
+    ; BX = n
+    MOV BX, AX
+
+    ; q_hi = sum_hi / n, rem1 = sum_hi % n
+    XOR DX, DX
+    MOV AX, sum_hi
+    DIV BX                 ; AX=q_hi, DX=rem1
+    PUSH AX                ; guardar q_hi
+    MOV CX, DX             ; rem1 en CX
+
+    ; q_lo = (rem1<<16 + sum_lo) / n
+    MOV AX, sum_lo
+    MOV DX, CX
+    DIV BX                 ; AX=q_lo
+    POP DX                 ; DX=q_hi  => DX:AX = promedio × 100000
+
+    ; imprimir promedio con tu nuevo impresor (no usa 100000)
+    CALL PrintScaled5_FromDXAX
+    CALL PrintCRLF
+    JMP AVG_DONE
+
+AVG_ZERO:
+    ; si no hubo válidas, imprimir 0.00000
+    XOR DX, DX
+    XOR AX, AX
+    CALL PrintScaled5_FromDXAX
     CALL PrintCRLF
 
+AVG_DONE:
     ; Máximo
     LEA DX, msgMax
     CALL PrintStr
@@ -466,7 +685,7 @@ DONE_NOTES:
     LEA DX, msgAprob
     CALL PrintStr
     MOV AX, cntAprob
-    CALL PrintUInt0_999_NoDiv
+    CALL PrintUInt0_255_NoDiv
     CALL PrintSpacePctTwo_NoDiv
     CALL PrintCRLF
 
@@ -474,7 +693,7 @@ DONE_NOTES:
     LEA DX, msgReprob
     CALL PrintStr
     MOV AX, cntReprob
-    CALL PrintUInt0_999_NoDiv
+    CALL PrintUInt0_255_NoDiv
     CALL PrintSpacePctTwo_NoDiv
     CALL PrintCRLF
 
@@ -569,9 +788,9 @@ CopyFromInput_Clamp PROC NEAR
     MOV DX, NAME_REC_LEN-1
     SUB DX, AX                         ; libres
     CMP CL, DL
-    JBE @len_ok
+    JBE @len_okn
     MOV CL, DL
-@len_ok:
+@len_okn:
     LEA SI, nameBuff+2
     JCXZ @done
     REP MOVSB
@@ -970,7 +1189,7 @@ PS5_INT_LOOP:
 PS5_INT_DONE:
     ; imprimir entero (BX)
     MOV AX, BX
-    CALL PrintUInt_NoDiv
+    CALL PrintUInt0_255_NoDiv
 
     ; punto
     MOV DL, '.'
@@ -1111,7 +1330,7 @@ PA_ENT_LOOP:
     JMP PA_ENT_LOOP
 PA_ENT_DONE:
     ; imprimir entero (0..100) con rutina simple
-    CALL PrintUInt0_999_NoDiv
+    CALL PrintUInt0_255_NoDiv
 
     ; '.'
     MOV DL, '.'
@@ -1188,80 +1407,78 @@ PA_AVG_END:
 PrintAverage_NoDiv ENDP
 
 
-; Imprime AX (0..999) sin DIV
-PrintUInt0_999_NoDiv PROC NEAR
+; Imprime AX en decimal (0..255) sin DIV, sin tocar BH
+PrintUInt0_255_NoDiv PROC NEAR
     PUSH AX
     PUSH BX
+    PUSH CX
     PUSH DX
 
-    MOV DX, AX          ; DX = valor
-    XOR BH, BH          ; BH = flag "ya imprimí algo"
+    MOV BX, AX          ; BX = valor (0..255)
+    XOR CH, CH          ; CH = flag_impreso (0/1)
 
     ; centenas
-    MOV BX, 100
     XOR AL, AL
-PU3_HUND_LOOP:
-    CMP DX, BX
-    JB  PU3_HUND_DONE
-    SUB DX, BX
+PU255_HUND_LOOP:
+    CMP BX, 100
+    JB  PU255_HUND_DONE
+    SUB BX, 100
     INC AL
-    JMP PU3_HUND_LOOP
-PU3_HUND_DONE:
+    JMP PU255_HUND_LOOP
+PU255_HUND_DONE:
     CMP AL, 0
-    JE  PU3_TENS
+    JE  PU255_TENS
     MOV DL, '0'
     ADD DL, AL
     CALL PrintChar
-    MOV BH, 1
+    MOV CH, 1
 
-PU3_TENS:
-    MOV BX, 10
+PU255_TENS:
     XOR AL, AL
-PU3_TENS_LOOP:
-    CMP DX, BX
-    JB  PU3_TENS_DONE
-    SUB DX, BX
+PU255_TENS_LOOP:
+    CMP BX, 10
+    JB  PU255_TENS_DONE
+    SUB BX, 10
     INC AL
-    JMP PU3_TENS_LOOP
-PU3_TENS_DONE:
-    CMP BH, 0
-    JNE PU3_TENS_PRINT
+    JMP PU255_TENS_LOOP
+PU255_TENS_DONE:
+    CMP CH, 0
+    JNE PU255_TENS_PRINT
     CMP AL, 0
-    JE  PU3_UNITS
-PU3_TENS_PRINT:
+    JE  PU255_UNITS
+PU255_TENS_PRINT:
     MOV DL, '0'
     ADD DL, AL
     CALL PrintChar
-    MOV BH, 1
+    MOV CH, 1
 
-PU3_UNITS:
-    ; DX < 10
-    MOV AL, DL          ; (no usar DL: lo recargamos abajo)
-    MOV AX, DX
+PU255_UNITS:
+    ; BX < 10   => BL es la unidad
     MOV DL, '0'
-    ADD DL, AL          ; OJO: AL ahora no es el de arriba; recarguemos bien:
-    ; corregimos: usar directamente DX como unidad
-    MOV AX, DX
-    MOV DL, '0'
-    ADD DL, AL
+    ADD DL, BL
     CALL PrintChar
 
     POP DX
+    POP CX
     POP BX
     POP AX
     RET
-PrintUInt0_999_NoDiv ENDP
+PrintUInt0_255_NoDiv ENDP
+
+
 
  
 
 
-; Usa AX = conteo (aprob/reprob). Denominador = studentCount.
-; Imprime: espacio, espacio, '(', XX.XX, '%', ')'
+; Usa AX = conteo (aprob/reprob). Denominador n = studentCount.
+; Imprime: "  (XX.XX%)" sin DIV (restas y *10 por sumas).
 PrintSpacePctTwo_NoDiv PROC NEAR
     PUSH AX
     PUSH BX
     PUSH CX
     PUSH DX
+    PUSH SI
+    PUSH DI
 
     ; "  ("
     MOV DL, ' '
@@ -1271,74 +1488,77 @@ PrintSpacePctTwo_NoDiv PROC NEAR
     MOV DL, '('
     CALL PrintChar
 
-    ; T = count * 100
-    MOV BX, AX              ; BX = count
+    ; BX = n (denominador)
+    XOR BX, BX
+    MOV BL, studentCount
+    CMP BL, 0
+    JE  PSP_ZERO
+
+    ; T = count * 100  (AX ya trae count)
+    MOV SI, AX          ; SI = count
     XOR AX, AX
     MOV CX, 100
-PPCT_MUL100_LOOP:
-    ADD AX, BX
-    LOOP PPCT_MUL100_LOOP   ; AX = count*100 (<=1500)
+PSP_MUL100:
+    ADD AX, SI
+    LOOP PSP_MUL100      ; AX = T (<= 1500)
 
     ; Q = T / n (entero) por restas
-    XOR DX, DX              ; DX = Q
-    MOV CL, studentCount
-    CMP CL, 0
-    JE  PPCT_ZERO
-PPCT_INT_LOOP:
-    CMP AX, CX
-    JB  PPCT_INT_DONE
-    SUB AX, CX
+    XOR DX, DX           ; DX = Q
+PSP_DIV_INT:
+    CMP AX, BX
+    JB  PSP_INT_DONE
+    SUB AX, BX
     INC DX
-    JMP PPCT_INT_LOOP
-PPCT_INT_DONE:
-    ; imprimir entero Q (DX)
+    JMP PSP_DIV_INT
+PSP_INT_DONE:
     MOV AX, DX
-    CALL PrintUInt_NoDiv
+    CALL PrintUInt0_255_NoDiv
 
     ; '.'
     MOV DL, '.'
     CALL PrintChar
 
-    ; 1er decimal: AX = resto*10, d1 = AX/n por restas
-    MOV BX, AX              ; BX=resto
-    SHL BX, 1               ; *2
-    MOV DX, AX
-    SHL DX, 1
-    SHL DX, 1               ; *8
-    ADD BX, DX              ; *10
-    MOV AX, BX
-    XOR DL, DL
-PPCT_D1_LOOP:
-    CMP AX, CX
-    JB  PPCT_D1_OUT
-    SUB AX, CX
-    INC DL
-    JMP PPCT_D1_LOOP
-PPCT_D1_OUT:
-    MOV BL, DL
+    ; --- primer decimal ---
+    ; AX = resto (0..n-1). r10 = AX * 10
+    MOV SI, AX
+    XOR AX, AX
+    MOV CX, 10
+PSP_MUL10_1:
+    ADD AX, SI
+    LOOP PSP_MUL10_1          ; AX = r*10
+
+    ; d1 = AX / n por restas
+    XOR DH, DH                ; DH = d1
+PSP_D1_LOOP:
+    CMP AX, BX
+    JB  PSP_D1_OUT
+    SUB AX, BX
+    INC DH
+    JMP PSP_D1_LOOP
+PSP_D1_OUT:
     MOV DL, '0'
-    ADD DL, BL
+    ADD DL, DH
     CALL PrintChar
 
-    ; 2do decimal: AX = (resto)*10, d2 = AX/n
-    MOV BX, AX
-    SHL BX, 1
-    MOV DX, AX
-    SHL DX, 1
-    SHL DX, 1
-    ADD BX, DX
-    MOV AX, BX
-    XOR DL, DL
-PPCT_D2_LOOP:
-    CMP AX, CX
-    JB  PPCT_D2_OUT
-    SUB AX, CX
-    INC DL
-    JMP PPCT_D2_LOOP
-PPCT_D2_OUT:
-    MOV BL, DL
+    ; --- segundo decimal ---
+    ; AX = resto1. r10 = AX * 10
+    MOV SI, AX
+    XOR AX, AX
+    MOV CX, 10
+PSP_MUL10_2:
+    ADD AX, SI
+    LOOP PSP_MUL10_2          ; AX = r*10
+
+    XOR DH, DH                ; DH = d2
+PSP_D2_LOOP:
+    CMP AX, BX
+    JB  PSP_D2_OUT
+    SUB AX, BX
+    INC DH
+    JMP PSP_D2_LOOP
+PSP_D2_OUT:
     MOV DL, '0'
-    ADD DL, BL
+    ADD DL, DH
     CALL PrintChar
 
     ; "%)"
@@ -1346,10 +1566,10 @@ PPCT_D2_OUT:
     CALL PrintChar
     MOV DL, ')'
     CALL PrintChar
-    JMP PPCT_EXIT
+    JMP PSP_EXIT
 
-PPCT_ZERO:
-    ; n=0 improbable aquí, pero por seguridad imprime 0.00%) 
+PSP_ZERO:
+    ; n = 0 (no debería ocurrir aquí)
     MOV DL, '0'
     CALL PrintChar
     MOV DL, '.'
@@ -1362,7 +1582,9 @@ PPCT_ZERO:
     MOV DL, ')'
     CALL PrintChar
 
-PPCT_EXIT:
+PSP_EXIT:
+    POP DI
+    POP SI
     POP DX
     POP CX
     POP BX
@@ -1374,107 +1596,307 @@ PrintSpacePctTwo_NoDiv ENDP
 
 
 
-; Convierte nota cadena (SI, CL=len) a 32-bit DX:AX escala x10^5
-; Sin DIV, usando (x8+x2) y completando decimales a 5
+
+; Convierte cadena en [SI] a DX:AX (×100000).
+; Se detiene en '$', NUL, CR(13) o espacio. Acepta un solo '.' y hasta 5 decimales.
 ParseNoteToScaled PROC NEAR
+    PUSH AX
     PUSH BX
     PUSH CX
+    PUSH DX
     PUSH SI
     PUSH DI
+    PUSH BP
 
-    XOR DX, DX
-    XOR AX, AX
-    XOR DH, DH       ; DH = flag punto
-    XOR DL, DL       ; DL = #decimales vistos (0..5)
+    XOR AX, AX                      ; total_lo
+    XOR DX, DX                      ; total_hi
+    MOV BYTE PTR [p_seen_dot], 0
+    MOV BYTE PTR [p_dec_count], 0
+
+    MOV CL, NOTE_REC_LEN-1          ; tope de seguridad
 
 PNS_LOOP:
     CMP CL, 0
     JE  PNS_END
-    LODSB
+    LODSB                            ; AL = *SI++
     DEC CL
+
+    ; fin de campo
+    CMP AL, '$'                      ; '$'
+    JE  PNS_END
+    CMP AL, 0                        ; NUL
+    JE  PNS_END
+    CMP AL, 13                       ; CR
+    JE  PNS_END
+    CMP AL, ' '                      ; espacio
+    JE  PNS_END
+
+    ; punto decimal
     CMP AL, '.'
     JE  PNS_DOT
+
+    ; ¿dígito?
     CMP AL, '0'
     JB  PNS_LOOP
     CMP AL, '9'
     JA  PNS_LOOP
-    SUB AL, '0'      ; AL = 0..9
+    SUB AL, '0'                      ; AL = 0..9
 
-    ; total = total*10 + AL  (x8+x2)
-    ; t2 -> BX:BP
+    ; total = total*10  (x8 + x2)
+    ; t2 -> BX:DI
     MOV BX, AX
-    MOV BP, DX
-    SHL BX, 1
-    RCL BP, 1
-    ; t8 -> DI:SI
-    MOV SI, AX
     MOV DI, DX
-    SHL SI, 1
+    SHL BX, 1
     RCL DI, 1
+    ; t8 -> SI:BP
+    MOV SI, AX
+    MOV BP, DX
     SHL SI, 1
-    RCL DI, 1
+    RCL BP, 1
     SHL SI, 1
-    RCL DI, 1
-    ; total = t8 + t2 + dígito
+    RCL BP, 1
+    SHL SI, 1
+    RCL BP, 1
+    ; total = t8 + t2
     ADD SI, BX
-    ADC DI, BP
+    ADC BP, DI
+    MOV AX, SI
+    MOV DX, BP
+
+    ; total += dígito
     MOV BL, AL
     XOR BH, BH
-    ADD SI, BX
-    ADC DI, 0
-    MOV AX, SI
-    MOV DX, DI
+    ADD AX, BX
+    ADC DX, 0
 
-    ; si estamos en parte fracc., contar decimales (máx 5)
-    CMP DH, 0
+    ; si estamos en fracción, contar decimales (máx 5)
+    CMP BYTE PTR [p_seen_dot], 0
     JE  PNS_LOOP
-    INC DL
-    CMP DL, 5
-    JA  PNS_END
+    MOV BL, [p_dec_count]
+    CMP BL, 5
+    JAE PNS_LOOP
+    INC BYTE PTR [p_dec_count]
     JMP PNS_LOOP
 
 PNS_DOT:
-    CMP DH, 0
+    ; aceptar un solo '.'
+    CMP BYTE PTR [p_seen_dot], 0
     JNE PNS_LOOP
-    MOV DH, 1
+    MOV BYTE PTR [p_seen_dot], 1
     JMP PNS_LOOP
 
 PNS_END:
-    ; completar con ceros si DL<5 => *10^(5-DL)
+    ; completar con ceros faltantes: *10^(5 - p_dec_count)
     MOV AL, 5
-    SUB AL, DL
+    SUB AL, [p_dec_count]
     JBE PNS_DONE
-    MOV CL, AL            ; usar CL como contador seguro
-
+    MOV CL, AL
 PNS_SCALE:
-    ; total *= 10  (x8 + x2)
     MOV BX, AX
-    MOV BP, DX
-    SHL BX, 1
-    RCL BP, 1
-    MOV SI, AX
     MOV DI, DX
-    SHL SI, 1
+    SHL BX, 1
     RCL DI, 1
+    MOV SI, AX
+    MOV BP, DX
     SHL SI, 1
-    RCL DI, 1
+    RCL BP, 1
     SHL SI, 1
-    RCL DI, 1
+    RCL BP, 1
+    SHL SI, 1
+    RCL BP, 1
     ADD SI, BX
-    ADC DI, BP
+    ADC BP, DI
     MOV AX, SI
-    MOV DX, DI
-
+    MOV DX, BP
     DEC CL
     JNZ PNS_SCALE
 
 PNS_DONE:
+    POP BP
     POP DI
     POP SI
+    POP DX
     POP CX
     POP BX
+    POP AX
     RET
 ParseNoteToScaled ENDP
+
+
+
+
+
+
+; Imprime AL como dos dígitos hex (usa PrintChar). No pisa DX entre llamadas.
+PrintHexByte PROC NEAR
+    PUSH AX
+    PUSH BX
+    ; BL = copia del byte original
+    MOV  BL, AL
+
+    ; nibble alto
+    MOV  AL, BL
+    SHR  AL, 4
+    CALL NibbleToHex
+
+    ; nibble bajo
+    MOV  AL, BL
+    AND  AL, 0Fh
+    CALL NibbleToHex
+
+    POP  BX
+    POP  AX
+    RET
+PrintHexByte ENDP
+
+NibbleToHex PROC NEAR   ; AL = 0..15
+    CMP  AL, 9
+    JBE  @dec
+    ADD  AL, 7
+@dec:
+    ADD  AL, '0'
+    MOV  DL, AL
+    CALL PrintChar
+    RET
+NibbleToHex ENDP
+
+; Imprime AX en hex: 4 dígitos (alto luego bajo)
+PrintHexWord PROC NEAR
+    push ax
+    mov  al, ah         ; byte alto
+    call PrintHexByte
+    pop  ax             ; AX original, AL = byte bajo
+    call PrintHexByte
+    ret
+PrintHexWord ENDP
+
+; Imprime AL como 2 hex (usa tu PrintHexByte si ya la tienes)
+; (Si ya tienes PrintHexByte buena, puedes omitir esta y la de arriba.)
+
+; Imprime AX (0..99999) en 5 dígitos con ceros a la izquierda
+PrintDec5Padded PROC NEAR
+    PUSH AX
+    PUSH BX
+    PUSH DX
+    MOV  BX, 10000
+    XOR  DX, DX
+    DIV  BX            ; AX/10000 -> ALTA cifra
+    ADD  AL, '0'
+    MOV  DL, AL
+    CALL PrintChar
+    MOV  AX, DX        ; resto
+
+    MOV  BX, 1000
+    XOR  DX, DX
+    DIV  BX
+    ADD  AL, '0'
+    MOV  DL, AL
+    CALL PrintChar
+    MOV  AX, DX
+
+    MOV  BX, 100
+    XOR  DX, DX
+    DIV  BX
+    ADD  AL, '0'
+    MOV  DL, AL
+    CALL PrintChar
+    MOV  AX, DX
+
+    MOV  BX, 10
+    XOR  DX, DX
+    DIV  BX
+    ADD  AL, '0'
+    MOV  DL, AL
+    CALL PrintChar
+
+    ADD  DL, '0'       ; último dígito (AX tenía el resto)
+    CALL PrintChar
+
+    POP  DX
+    POP  BX
+    POP  AX
+    RET
+PrintDec5Padded ENDP
+
+; ================== 32-bit / 10 ==================
+; Entrada:  DX:AX = valor (32 bits)
+; Salida :  DX:AX = cociente (32 bits)
+;           div10_rem = resto (0..9)
+; Regs   :  NO modifica CX. Modifica BX, SI, BP internamente (preservados).
+Div32By10 PROC NEAR
+    PUSH BX
+    PUSH SI
+    PUSH BP
+
+    MOV  BX, 10
+    MOV  SI, AX          ; guarda low
+    MOV  AX, DX
+    XOR  DX, DX
+    DIV  BX              ; AX = q_hi, DX = r_hi (0..9)
+    MOV  BP, AX          ; BP = q_hi
+
+    MOV  AX, SI          ; low original
+    ; DX = r_hi
+    DIV  BX              ; AX = q_lo, DX = resto final (0..9)
+
+    MOV  [div10_rem], DL ; guardar resto
+    MOV  DX, BP          ; DX:AX = q_hi:q_lo
+
+    POP  BP
+    POP  SI
+    POP  BX
+    RET
+Div32By10 ENDP
+
+; ========== Imprime DX:AX como entero.fffff (×100000) ==========
+; Usa tu PrintUInt0_255_NoDiv y PrintChar. NO usa 100000.
+PrintScaled5_FromDXAX PROC NEAR
+    PUSH AX
+    PUSH BX
+    PUSH CX
+    PUSH DX
+    PUSH SI
+    PUSH DI
+
+    ; 1) Obtener 5 dígitos fraccionales (menos significativo primero)
+    LEA  DI, frac5
+    ADD  DI, 4           ; DI -> última posición
+    MOV  CX, 5
+.ps5_get:
+    CALL Div32By10       ; DX:AX = valor/10 ; div10_rem = resto
+    MOV  AL, [div10_rem]
+    ADD  AL, '0'
+    MOV  [DI], AL
+    DEC  DI
+    LOOP .ps5_get
+
+    ; 2) DX:AX ahora contiene la PARTE ENTERA (0..100 aprox).
+    ;    Imprímela con tu rutina 0..255 (AX basta).
+    MOV  AX, AX          ; AX ya trae q_lo (entero)
+    CALL PrintUInt0_255_NoDiv
+
+    ; 3) Punto decimal
+    MOV  DL, '.'
+    CALL PrintChar
+
+    ; 4) Imprimir los 5 dígitos fraccionales en orden
+    LEA  DI, frac5
+    MOV  CX, 5
+.ps5_put:
+    MOV  DL, [DI]
+    CALL PrintChar
+    INC  DI
+    LOOP .ps5_put
+
+    POP  DI
+    POP  SI
+    POP  DX
+    POP  CX
+    POP  BX
+    POP  AX
+    RET
+PrintScaled5_FromDXAX ENDP
+
 
 
 
