@@ -39,7 +39,7 @@ DATA SEGMENT
     msgEnterNote    DB 13,10,'Ingrese Nota (0-100, hasta 5 decimales): $'
     msgStored       DB 13,10,'Datos almacenados correctamente.$'
     msgFull         DB 13,10,'Error: Capacidad maxima (15 estudiantes) alcanzada.$'
-    msgInvalidNote  DB 13, 10, 'Error: Nota invalida. Ingrese valor entre 0-100 y maximo 5 decimales.$'
+    msgInvalidNote  DB 13,10, 'Error: Nota invalida. Ingrese valor entre 0-100 y maximo 5 decimales.$'
    
     
     ; Mensajes de stub (temporal) (mas abajo digo que es stub)
@@ -53,11 +53,24 @@ DATA SEGMENT
     ; realmente y 2 los caracteres escritos por el usuario)
     nameBuff        DB  NAME_REC_LEN, 0, NAME_REC_LEN DUP(0)
     noteBuff        DB  NOTE_REC_LEN, 0, NOTE_REC_LEN DUP(0)  
+    indexBuff       DB  5, 0, 5 DUP(0) ; Buffer para leer el indice 
+    
     
     ; Estructuras de almacenamiento 
     studentCount    DB 0
     names           DB MAX_STUDENTS*NAME_REC_LEN DUP('$')
     notes           DB MAX_STUDENTS*NOTE_REC_LEN DUP('$')
+    
+    ; Mensajes de la opcion 3     
+    msgEnterIndex   DB 13,10,'Ingrese indice de estudiante [0 - 14]: $'
+    ; Errores
+    msgNoStudents   DB 13,10,'No se han agregado estudiantes.$'
+    msgInvalidIndex DB 13,10,'Indice invalido. Intentelo de nuevo.$' 
+    ; Estudiante encontrado
+    msgFoundStudent DB 13,10,'El estudiante se ha encontrado: $'
+    msgName         DB 13,10,'Nombre: $'
+    msgNote         DB 13,10,'Nota: $'
+    
 
 DATA ENDS
 
@@ -296,12 +309,86 @@ OPT_2:
     CALL PressAnyKey
     JMP MAIN_MENU
 
+; -----------------Opcion 1: Ingresar datos del estudiante----------
 OPT_3:
-    LEA DX, msgStub3
+    MOV AL, studentCount
+    CMP AL, 0
+    JE NO_STUDENTS_YET ; Si no hay estudiantes muestra el mensaje de que no se han agregado
+    
+    ;Mensaje de prompt dinamico con el rango maximo
+    PUSH DX ;Guarda el DX porque el PrintNum lo cambia
+    MOV BL, studentCount
+    DEC BL  ; studentCount - 1 para el indice mayor
+    MOV AL, BL
+    MOV AH, 0 ; Limpia el AH para luego ConvertByteToASCII
+    CALL ConvertByteToASCII 
+    
+    LEA DX, msgEnterIndex
+    CALL PrintStr
+    POP DX ; Recupera el DX
+    
+    LEa DX, indexBuff
+    CALL ReadLine ; Lee el indice ingresado 
+    
+    ; Validar que se haya ingresado algun dato
+    MOV CL, [indexBuff+1]
+    CMP CL, 0
+    JE INVALID_INDEX_OPT3 ; No se metio nada 
+    
+    ; Convierte el string de entrada en un numero
+    LEA SI, indexBuff+2
+    MOV CH, [indexBuff+1] ; Longitud de la cadena a convertir
+    Call ASCII_TO_BYTE ; Devuelve el numero en AL CF=0 si todo bien o CF=1 si hay error
+    
+    JC INVALID_INDEX_OPT3 ; Si hay un error en la conversion sale un indice invalido
+    
+    ; AL contiene el indice 
+    CMP AL, studentCount
+    JAE INVALID_INDEX_OPT3 ; Indice fuera de rango
+    
+    ; Si el indice es valido, busca y muestra al estudiante, Calcula la direccion del nombre
+    XOR BX, BX
+    MOV BL, AL ; BX es el indice del estudiante
+    
+    LEA SI, names
+    MOV AX,BX
+    MOV CX, NAME_REC_LEN
+    MUL CX  ; AX = index * NAME_REC_LEN
+    ADD SI, AX ; SI esta apuntando al nombre del estudiante
+    
+    LEA DX, msgName
+    Call PrintStr
+    MOV DX, SI
+    CALL PrintStr ; Se imprime el nombre
+    
+    ; Se calcula la direccion de donde esta la nota 
+    LEA SI, notes
+    MOV AX, BX
+    MOV CX, NOTE_REC_LEN
+    MUL CX  ; AX = index*NOTE_REC_LEN
+    ADD SI, AX ; SI esta apuntando a la nota del estudiante
+    
+    LEA DX, msgNote
+    CALL PrintStr
+    MOV DX, SI
+    CALL PrintStr ; Se imprime la nota
+    
+    CALL PressAnyKey
+    JMP MAIN_MENU
+;----------Funciones auxiliares para opcion 3------------------    
+NO_STUDENTS_YET:
+    LEA DX, msgNoStudents
+    Call PrintStr
+    Call PressAnyKey
+    JMP MAIN_MENU
+    
+INVALID_INDEX_OPT3:
+    LEA DX, msgInvalidIndex
     CALL PrintStr
     CALL PressAnyKey
     JMP MAIN_MENU
-
+                                                                                          
+                                                                                        
 OPT_4:
     LEA DX, msgStub4
     CALL PrintStr
@@ -523,6 +610,123 @@ VN_DONE:
     RET
 ValidateNote ENDP
 
+;------- Subrutinas para la opcion 3 -----------------------
+
+; ASCII_TO_BYTE
+; Convierte una cadena ASCII numérica a un byte.
+; Entrada: SI = Puntero a la cadena ASCII (ej: '15', '0', '99')
+;          CH = Longitud de la cadena
+; Salida:  AL = Numero convertido (0-255)
+;          CF = 0 si la conversion es exitosa, 1 si hay un error (no numorico, desbordamiento)
+ASCII_TO_BYTE PROC NEAR
+    PUSH BX
+    PUSH CX
+    PUSH DX
+
+    XOR AX, AX   ; AL = resultado (acumulador)
+    XOR BX, BX   ; BX = 10 (para multiplicaciones)
+    MOV BL, 10
+    CLD          ; Direccion de incremento para LODSB
+
+ATB_LOOP:
+    CMP CH, 0
+    JE ATB_DONE  ; Si no quedan caracteres, terminamos
+
+    LODSB        ; Carga el byte en AL, incrementa SI, decrementa CH
+
+    CMP AL, '0'
+    JB ATB_ERROR ; No es un digito
+    CMP AL, '9'
+    JA ATB_ERROR ; No es un digito
+
+    SUB AL, '0'  ; Convertir ASCII a digito (0-9)
+
+    PUSH AX      ; Guardar digito actual
+    MOV AL, AH   ; Mover el acumulado temporal (AH es el acumulador antes de desbordar)
+    MUL BL       ; AL = AL * 10 (resultado en AX)
+    JO ATB_ERROR ; Comprobar desbordamiento (Overflow Flag)
+
+    MOV AH, AL   ; Guardar el resultado en AH
+    POP AX       ; Recuperar el digito actual
+    ADD AH, AL   ; Sumar el digito actual
+    JO ATB_ERROR ; Comprobar desbordamiento
+
+    JMP ATB_LOOP
+
+ATB_ERROR:
+    STC ; Poner Carry Flag a 1 para indicar error
+    JMP ATB_END
+
+ATB_DONE:
+    MOV AL, AH   ; Mover el resultado final de AH a AL
+    CLC          ; Limpiar Carry Flag para indicar exito
+
+ATB_END:
+    POP DX
+    POP CX
+    POP BX
+    RET
+ASCII_TO_BYTE ENDP
+
+; ConvertByteToASCII
+; Convierte un byte (0-99) a su representacion ASCII y lo almacena en una parte de msgEnterIndex.
+; Es para el mensaje: 'Ingrese el indice del estudiante a buscar (0-X): $'
+; Donde X es studentCount - 1. Asume que X es como maximo un numero de 2 digitos.
+; Entrada: AL = byte a convertir (ej. 14 para 0-14)
+; Salida:  Modifica msgEnterIndex para mostrar el numero correctamente.
+ConvertByteToASCII PROC NEAR
+    PUSH AX
+    PUSH BX
+    PUSH CX
+    PUSH DX
+    PUSH DI
+
+    ; Calcular el valor maximo (studentCount - 1)
+    MOV AH, 0 ; Limpiar AH
+    MOV BL, 10 ; Divisor
+
+    ; Posicion para escribir el numero en el mensaje
+    ; El mensaje es: 'Ingrese el indice del estudiante a buscar (0-', 0,'): $'
+    ; El '0' esta en offset 49, seguido por el espacio para el numero y luego '): $'
+    ; Deberiamos escribir el numero en la posicion del 0, y el '): $' se mueve si es de 2 digitos.
+    ; Realmente, el 0 en '0-' es el inicio. El lugar para el max_index es despues del '-'.
+    ; msgEnterIndex DB 13,10,'Ingrese el indice del estudiante a buscar (0-', 0,'): $'
+    ; La posicion del 0 es msgEnterIndex + 49. El siguiente byte es el que vamos a modificar.
+    LEA DI, msgEnterIndex + 50 ; Apunta al byte despues del '-'
+
+    CMP AL, 10 ; Si es menor a 10, es un solo digito
+    JB CVTA_ONE_DIGIT
+
+    ; Dos digitos
+    DIV BL ; AL = cociente (decenas), AH = resto (unidades)
+    ADD AL, '0'
+    MOV BYTE PTR [DI], AL ; Escribir decenas
+    INC DI
+    MOV AL, AH ; Unidades
+    JMP CVTA_ONE_DIGIT_STORE
+
+CVTA_ONE_DIGIT:
+    ADD AL, '0'
+CVTA_ONE_DIGIT_STORE:
+    MOV BYTE PTR [DI], AL ; Escribir unidades
+    INC DI
+
+    ; Colocar los caracteres finales del mensaje
+    MOV BYTE PTR [DI], ')'
+    INC DI
+    MOV BYTE PTR [DI], ':'
+    INC DI
+    MOV BYTE PTR [DI], ' '
+    INC DI
+    MOV BYTE PTR [DI], '$'
+    
+    POP DI
+    POP DX
+    POP CX
+    POP BX
+    POP AX
+    RET
+ConvertByteToASCII ENDP
 
 CODE ENDS
 END START
