@@ -730,12 +730,6 @@ NO_DATA_STATS:
 ; solo las entradas al hacer click en una de las opciones 
 
 
-OPT_2:
-    LEA DX, msgStub2
-    CALL PrintStr
-    CALL PressAnyKey
-    JMP MAIN_MENU
-
 ; -----------------Opcion 3: Ingresar el indice del estudiante----------
 OPT_3:
     MOV AL, studentCount
@@ -1058,7 +1052,10 @@ PrintChar ENDP
 
 ; Imprime entero sin signo en AX
 ; Por restas de 10000,1000,100,10 y luego unidades
-PrintUInt_NoDiv PROC NEAR
+PrintUInt_NoDiv PROC NEAR   
+    
+    
+    
 
 ;------- Subrutinas para la opcion 3 -----------------------
 
@@ -1130,8 +1127,8 @@ ConvertByteToASCII PROC NEAR
     PUSH BX
     PUSH CX
     PUSH DX
-<<<<<<< HEAD
     PUSH DI
+    PUSH SI
 
     ; Calcular el valor maximo (studentCount - 1)
     MOV AH, 0 ; Limpiar AH
@@ -1172,9 +1169,8 @@ CVTA_ONE_DIGIT_STORE:
     INC DI
     MOV BYTE PTR [DI], '$'
     
-    POP DI
-=======
-    PUSH SI
+
+    
 
     MOV DX, AX          ; DX = valor
     XOR BH, BH          ; BH = flag "ya imprime algo"
@@ -1267,7 +1263,7 @@ PU_UNITS:
     CALL PrintChar
 
     POP SI
->>>>>>> origin/estadistic_josepa
+    POP DI
     POP DX
     POP CX
     POP BX
@@ -1275,7 +1271,7 @@ PU_UNITS:
     RET
     
 ConvertByteToASCII ENDP
-PrintUInt_NoDiv ENDP
+
 
 
 ; ----------------- Cadenas -----------------
